@@ -677,4 +677,4 @@ async def stopnick(ctx):
 
 
 
-bot.run("MTI5NTM4MDUxNDkzMjM5NjAzNA.G2b9wi.f8uIAMKxc6TQ_uMxSLQdjno8uiWiVEqt1SqU74", bot=False)
+bot.run("", bot=False)
