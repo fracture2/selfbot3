@@ -25,6 +25,13 @@ afk_reason = ""
 
 
 def get_prefix():
+    sid = os.environ.get("BOT_SESSION", "")
+    if sid:
+        try:
+            with open(f"sessions/{sid}.json") as f:
+                return json.load(f).get("prefix", ",")
+        except Exception:
+            return ","
     try:
         with open("config.json") as f:
             return json.load(f).get("prefix", ",")
@@ -37,7 +44,7 @@ intents.messages = True
 intents.guilds = True
 
 bot = commands.Bot(
-    command_prefix=get_prefix(), help_command=None, self_bot=True, intents=intents
+    command_prefix=lambda b, m: get_prefix(), help_command=None, self_bot=True, intents=intents
 )
 
 
@@ -102,7 +109,36 @@ async def on_ready():
     print(
         "\033[92mâ SelfBot is online. Type 'refresh' in this terminal to reload.\033[0m"
     )
-    bot.loop.create_task(terminal_listener())
+    # Session worker: write status to file for panel to read
+    _sid = os.environ.get("BOT_SESSION", "")
+    if _sid:
+        async def _write_status():
+            import os as _os
+            _os.makedirs("sessions", exist_ok=True)
+            while not bot.is_closed():
+                try:
+                    _data = {
+                        "online": True,
+                        "username": str(bot.user) if bot.user else None,
+                        "guilds": len(bot.guilds),
+                        "users": len(set(bot.get_all_members())),
+                        "latency": round(bot.latency * 1000) if bot.latency else None,
+                    }
+                    with open(f"sessions/{_sid}_status.json", "w") as _f:
+                        import json as _j
+                        _j.dump(_data, _f)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+        bot.loop.create_task(_write_status())
+    else:
+        try:
+            import panel as _panel
+            _panel.set_bot(bot)
+        except Exception:
+            pass
+    if not _sid:
+        bot.loop.create_task(terminal_listener())
     try:
         await bot.http.request(
             discord.http.Route("PATCH", "/users/@me/settings"),
@@ -916,62 +952,76 @@ import threading
 import subprocess
 
 
+SESSION_ID = os.environ.get("BOT_SESSION", "")
+IS_WORKER = os.environ.get("BOT_WORKER") == "1"
+RETRY_DELAY = 5
+
+
 def clean_token(raw):
     t = raw.strip().strip("\"'").strip("\u201c\u201d\u2018\u2019").strip()
     for prefix in ("Bot ", "Bearer ", "bot ", "bearer "):
         if t.startswith(prefix):
-            t = t[len(prefix) :]
+            t = t[len(prefix):]
             break
     return t
 
 
-IS_WORKER = os.environ.get("BOT_WORKER") == "1"
-RETRY_DELAY = 5
+def load_token():
+    if SESSION_ID:
+        return clean_token(os.environ.get("BOT_TOKEN", ""))
+    try:
+        with open("token.json") as f:
+            t = json.load(f).get("token", "")
+            if t:
+                return clean_token(t)
+    except Exception:
+        pass
+    return clean_token(os.environ.get("DISCORD_TOKEN", ""))
 
-token = clean_token(os.environ.get("DISCORD_TOKEN", ""))
-if not token:
-    print("\033[91mâ Error: DISCORD_TOKEN is not set.\033[0m")
-    sys.exit(1)
 
-if not IS_WORKER:
-    from panel import start_panel
+token = load_token()
 
-    threading.Thread(target=start_panel, daemon=True).start()
+if SESSION_ID:
+    # Running as a session worker spawned by the panel
+    if not token:
+        print("[SelfBot] No BOT_TOKEN for session worker.")
+        sys.exit(1)
+    while True:
+        try:
+            bot.run(token, bot=False)
+            print("[SelfBot] Session worker disconnected cleanly, restarting...")
+        except discord.errors.LoginFailure:
+            print("[SelfBot] Invalid token for session.")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            sys.exit(0)
+        except Exception as e:
+            print(f"[SelfBot] Session worker crashed: {e}")
+        time.sleep(RETRY_DELAY)
+        os.execl(sys.executable, sys.executable, *sys.argv)
+else:
+    if not IS_WORKER:
+        from panel import start_panel
+        threading.Thread(target=start_panel, daemon=True).start()
 
-    # Spawn worker processes for DISCORD_TOKEN_2, DISCORD_TOKEN_3, etc.
-    for i in range(2, 20):
-        extra_token = clean_token(os.environ.get(f"DISCORD_TOKEN_{i}", ""))
-        if not extra_token:
-            break
+    if not token:
+        print("[SelfBot] No token. Running in panel-only mode.")
+        while True:
+            time.sleep(60)
 
-        def run_extra_bot(t=extra_token, num=i):
-            env_extra = os.environ.copy()
-            env_extra["DISCORD_TOKEN"] = t
-            env_extra["BOT_WORKER"] = "1"
-            while True:
-                print(f"\033[94mð Starting bot {num}...\033[0m")
-                proc = subprocess.Popen([sys.executable, __file__], env=env_extra)
-                proc.wait()
-                print(
-                    f"\033[91mâ ï¸  Bot {num} crashed, restarting in {RETRY_DELAY}s...\033[0m"
-                )
-                time.sleep(RETRY_DELAY)
-
-        threading.Thread(target=run_extra_bot, daemon=True).start()
-        print(f"\033[92mâ Bot {i} (DISCORD_TOKEN_{i}) is launching...\033[0m")
-
-label = "bot 2" if IS_WORKER else "bot"
-try:
-    print(f"\033[94mð Starting {label}...\033[0m")
-    bot.run(token, bot=False)
-except discord.errors.LoginFailure:
-    print(f"\033[91mâ Invalid token for {label}. Check your secret.\033[0m")
-    sys.exit(1)
-except KeyboardInterrupt:
-    print("\033[91mð Bot stopped by user.\033[0m")
-    sys.exit(0)
-except Exception as e:
-    print(f"\033[91mâ ï¸  Bot crashed: {e}\033[0m")
-    print(f"\033[93mð Restarting in {RETRY_DELAY} seconds...\033[0m")
-    time.sleep(RETRY_DELAY)
-    os.execl(sys.executable, sys.executable, *sys.argv)
+    label = "bot 2" if IS_WORKER else "bot"
+    while True:
+        try:
+            print(f"[94mStarting {label}...[0m")
+            bot.run(token, bot=False)
+            print(f"[93m[SelfBot] {label} disconnected cleanly, restarting in {RETRY_DELAY}s...[0m")
+        except discord.errors.LoginFailure:
+            print(f"[91mInvalid token for {label}. Stopping.[0m")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("[91mBot stopped.[0m")
+            sys.exit(0)
+        except Exception as e:
+            print(f"[91m[SelfBot] {label} crashed: {e}[0m")
+        time.sleep(RETRY_DELAY)
+        os.execl(sys.executable, sys.executable, *sys.argv)
