@@ -1024,4 +1024,11 @@ else:
         except Exception as e:
             print(f"[91m[SelfBot] {label} crashed: {e}[0m")
         time.sleep(RETRY_DELAY)
+    
         os.execl(sys.executable, sys.executable, *sys.argv)
+
+- name: Deploy Script to Bunny Edge Scripting
+  uses: BunnyWay/actions/deploy-script@main
+  with:
+    script_id: 69899
+    file: "script.ts"
